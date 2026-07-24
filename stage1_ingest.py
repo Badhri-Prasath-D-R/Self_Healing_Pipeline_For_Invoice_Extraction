@@ -36,8 +36,12 @@ def load_client(model_path: Path, device: str):
 
     print(f"[model] Loading model from {model_path} on device={device} ...")
 
-    dtype = "auto"
-    device_map = device if device != "cpu" else None
+    if device == "cpu":
+        dtype = "float32"
+        device_map = None
+    else:
+        dtype = torch.float16
+        device_map = {"": 0}  # pin everything to cuda:0, avoid "auto" sharding overhead
 
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         str(model_path),
@@ -53,13 +57,12 @@ def load_client(model_path: Path, device: str):
         backend="transformers",
         model=model,
         processor=processor,
-        image_analysis=False,
+        image_analysis=False,  # set True if you also want chart/image descriptions
     )
     return client
 
-
 def pdf_to_images(pdf_path: Path):
-    import fitz 
+    import fitz
     from PIL import Image
     import io
 
@@ -101,7 +104,6 @@ def main():
     parser.add_argument("pdf", nargs="?", help="Single PDF filename (in data/raw_pdfs/) to process. If omitted, processes all PDFs.")
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"], help="Device to run the model on")
     args = parser.parse_args()
-
     device = args.device
     if device == "auto":
         try:
@@ -128,8 +130,10 @@ def main():
     model_path = ensure_model_downloaded()
     client = load_client(model_path, device)
 
+
     for pdf_path in pdf_files:
         try:
+            print(pdf_path,' ')
             extract_pdf(client, pdf_path, OUTPUT_DIR)
         except Exception as e:
             print(f"[error] Failed on {pdf_path.name}: {e}", file=sys.stderr)

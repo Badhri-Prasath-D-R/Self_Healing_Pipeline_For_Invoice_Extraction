@@ -1,0 +1,50 @@
+[
+  {
+    "source_file": "0000153377.md",
+    "extraction": {
+      "document_type": "report",
+      "title": "Education and Professional Experience",
+      "author": "KUS Fitzmaurice, Mary Anne Hill",
+      "education": [
+        {
+          "institution": "St. John's University, Long Island, New York",
+          "degree": "B.S.",
+          "year_contained": "1958"
+        },
+        {
+          "institution": "New York University, New York, New York",
+          "degree": "M.S.",
+          "year_contained": "1958-60"
+        },
+        {
+          "institution": "New York University, New York, New York",
+          "degree": "M.S.",
+          "year_contained": "1967-68"
+        }
+      ],
+      "research_experience": [
+        {
+          "position": "Research Biologist",
+          "company": "Pacific Northwest Research Foundation",
+          "start_date": "1968-present"
+        },
+        {
+          "position": "Senior Research Aide",
+          "company": "Sloan-Kettering Institute for Cancer Research",
+          "start_date": "1960-67"
+        },
+        {
+          "position": "Assistant in Microbiology Laboratory",
+          "company": "New York University College of Arts and Sciences",
+          "start_date": "1958-1960"
+        }
+      ],
+      "scientific_societies": [
+        "The New York Academy of Sciences",
+        "American Association for the Advancement of Science",
+        "American Institute of Biological Sciences"
+      ],
+      "publications": "See enclosed list."
+    }
+  }
+]
