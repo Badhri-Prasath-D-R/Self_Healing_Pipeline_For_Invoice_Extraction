@@ -1,3 +1,49 @@
+#!/usr/bin/env python3
+"""
+Stage 2: parse extracted invoice text into structured JSON matching the
+FIXED schema used by our eval dataset (Kaggle "High-Quality OCR-Ready
+Invoice PDFs"):
+
+{
+  "invoice_no": str,
+  "date_of_issue": str,          # as written, e.g. "03/07/2023"
+  "seller": {
+    "name": str, "address": str, "tax_id": str, "gstin": str (optional)
+  },
+  "client": {
+    "name": str, "address": str, "tax_id": str
+  },
+  "items": [
+    {
+      "item_no": str, "description": str, "quantity": str,
+      "unit_measure": str, "net_price": str, "net_worth": str,
+      "vat_pct": str, "gross_worth": str
+    }
+  ],
+  "summary": {
+    "vat_pct": str, "net_worth": str, "vat_amount": str,
+    "gross_worth": str, "total_net_worth": str, "total_vat": str,
+    "total_gross_worth": str
+  }
+}
+
+NOTE: in the ground-truth dataset all numeric-looking values (prices,
+quantities, totals) are kept as STRINGS, formatted with thousands
+commas (e.g. "74,120.00") and totals are prefixed with currency
+(e.g. "INR 1,676,976.00"). The prompt below asks the model to mirror
+that convention so its output can be diffed directly against ground
+truth without a normalization step. If your real-world documents don't
+follow this convention, loosen this prompt later.
+
+Directory layout:
+    data/eval_dataset/dataset.json  -> input (from stage0_build_eval_dataset.py)
+    data/structured_json/           -> output predictions
+    models/qwen2.5-1.5b/            -> local cache for the downloaded LLM
+
+Requirements:
+    pip install langchain langchain-huggingface transformers torch huggingface_hub
+"""
+
 import json
 import re
 import sys
@@ -7,44 +53,81 @@ from typing import Any
 MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 
 BASE_DIR = Path(__file__).resolve().parent
-MD_DIR = BASE_DIR / "data" / "extracted_md"
+EVAL_DATASET_FILE = BASE_DIR / "data" / "eval_dataset" / "dataset.json"
 OUTPUT_DIR = BASE_DIR / "data" / "structured_json"
-OUTPUT_FILE = OUTPUT_DIR / "dataset.json"
+OUTPUT_FILE = OUTPUT_DIR / "predictions.json"
 MODEL_DIR = BASE_DIR / "models" / "qwen2.5-1.5b"
+PROMPT_FILE = BASE_DIR / "prompts" / "current_system_prompt.txt"
 
 MAX_INPUT_CHARS = 6000
 
-SYSTEM_PROMPT = """You are a strict information-extraction engine for invoices and \
-similar business documents.
+DEFAULT_SYSTEM_PROMPT = """You are a strict invoice information-extraction engine.
 
-Read the document content provided by the user and extract every relevant \
-field you can find into a single flat-ish JSON object. Do NOT force a fixed \
-schema — invent key names that describe what you found (e.g. "vendor_name", \
-"invoice_number", "invoice_date", "currency", "subtotal", "tax", "total", \
-"line_items", "bill_to", "due_date", etc.). Common invoice fields:
+Read the OCR text of an invoice and extract fields into EXACTLY this JSON \
+schema — use these exact key names, this exact nesting, every time:
 
-- vendor / seller name and contact info
-- invoice number / reference number
-- invoice date and due date
-- currency
-- line items (as a JSON array of objects, each with whatever fields apply: \
-description, quantity, unit_price, amount)
-- subtotal, tax, discounts, total / amount due
-- payment terms, PO number, if present
-
-If the document is clearly NOT an invoice (e.g. a report, letter, contract), \
-still extract whatever structured fields make sense for that document type \
-(e.g. "document_type", "title", "date", "parties", "summary"), using your \
-own judgement for key names.
+{
+  "invoice_no": "<string>",
+  "date_of_issue": "<string, as written in the document, e.g. 03/07/2023>",
+  "seller": {
+    "name": "<string>",
+    "address": "<string>",
+    "tax_id": "<string>",
+    "gstin": "<string, omit key if not present>"
+  },
+  "client": {
+    "name": "<string>",
+    "address": "<string>",
+    "tax_id": "<string>"
+  },
+  "items": [
+    {
+      "item_no": "<string, e.g. '1.'>",
+      "description": "<string>",
+      "quantity": "<string, e.g. '9.00'>",
+      "unit_measure": "<string, e.g. 'pcs'>",
+      "net_price": "<string, formatted with thousands commas, e.g. '74,120.00'>",
+      "net_worth": "<string, same number formatting>",
+      "vat_pct": "<string, e.g. '10%'>",
+      "gross_worth": "<string, same number formatting>"
+    }
+  ],
+  "summary": {
+    "vat_pct": "<string>",
+    "net_worth": "<string>",
+    "vat_amount": "<string>",
+    "gross_worth": "<string>",
+    "total_net_worth": "<string, prefixed with currency, e.g. 'INR 1,676,976.00'>",
+    "total_vat": "<string, prefixed with currency>",
+    "total_gross_worth": "<string, prefixed with currency>"
+  }
+}
 
 Rules:
-- Return ONLY a single valid JSON object. No prose, no markdown code fences, \
+- Keep ALL numeric-looking values (prices, quantities, totals) as STRINGS, \
+formatted with thousands-separator commas and two decimal places, exactly \
+as they would appear printed on the invoice (e.g. "74,120.00", not 74120).
+- The three "total_*" fields in summary should be prefixed with the \
+currency code exactly as printed (e.g. "INR 1,676,976.00").
+- If the document has only one item, "items" is still a list with one entry.
+- If a field genuinely cannot be found, use an empty string "" rather than \
+inventing a value.
+- Return ONLY the single JSON object. No prose, no markdown code fences, \
 no explanations, no trailing commentary.
-- Use null for a field you expect but cannot find. Omit fields that don't \
-apply rather than inventing placeholders.
-- Numbers (amounts, quantities) should be JSON numbers, not strings, when \
-they are cleanly numeric.
 """
+
+
+def load_system_prompt() -> str:
+    """Use the versioned prompt file if present (updated by the self-healing
+    loop later), otherwise fall back to the hardcoded default above."""
+    if PROMPT_FILE.exists():
+        text = PROMPT_FILE.read_text(encoding="utf-8").strip()
+        if text:
+            print(f"[prompt] Using versioned prompt from {PROMPT_FILE}")
+            return text
+    print("[prompt] Using built-in default prompt (no versioned prompt file found)")
+    return DEFAULT_SYSTEM_PROMPT
+
 
 def ensure_model_downloaded() -> Path:
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -65,7 +148,8 @@ def ensure_model_downloaded() -> Path:
     print("[model] Download complete.")
     return MODEL_DIR
 
-def build_chain(model_path: Path, device: str):
+
+def build_chain(model_path: Path, device: str, system_prompt: str):
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
     from langchain_huggingface import HuggingFacePipeline, ChatHuggingFace
@@ -102,13 +186,14 @@ def build_chain(model_path: Path, device: str):
 
     prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", SYSTEM_PROMPT),
-            ("human", "Document content:\n\n{document}"),
+            ("system", system_prompt),
+            ("human", "Invoice OCR text:\n\n{document}"),
         ]
     )
 
     chain = prompt | chat_model | StrOutputParser()
     return chain
+
 
 def extract_json(raw_text: str) -> Any:
     text = raw_text.strip()
@@ -132,33 +217,38 @@ def extract_json(raw_text: str) -> Any:
 
     raise ValueError("Could not parse valid JSON from model output")
 
-def parse_file(chain, md_path: Path) -> dict:
-    text = md_path.read_text(encoding="utf-8")
+
+def parse_record(chain, record: dict) -> dict:
+    text = record["input_text"]
     if len(text) > MAX_INPUT_CHARS:
         text = text[:MAX_INPUT_CHARS]
 
-    print(f"[parse] {md_path.name}")
+    print(f"[parse] {record['source_file']}")
     raw_output = ""
     try:
         raw_output = chain.invoke({"document": text})
         parsed = extract_json(raw_output)
+        error = None
     except Exception as e:
-        print(f"[warn] Failed to parse valid JSON for {md_path.name}: {e}", file=sys.stderr)
-        parsed = {
-            "_parse_error": str(e),
-            "_raw_model_output": raw_output,
-        }
+        print(f"[warn] Failed to parse valid JSON for {record['source_file']}: {e}", file=sys.stderr)
+        parsed = None
+        error = str(e)
 
     return {
-        "source_file": md_path.name,
-        "extraction": parsed,
+        "source_file": record["source_file"],
+        "prediction": parsed,
+        "ground_truth": record["ground_truth"],
+        "raw_model_output": raw_output,
+        "parse_error": error,
     }
+
 
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Parse extracted markdown into structured invoice JSON")
+    parser = argparse.ArgumentParser(description="Run Stage 2 predictions against the eval dataset")
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
+    parser.add_argument("--limit", type=int, default=None, help="Only process the first N records (for quick testing)")
     args = parser.parse_args()
 
     device = args.device
@@ -169,27 +259,26 @@ def main():
         except ImportError:
             device = "cpu"
 
-    if not MD_DIR.exists():
-        print(f"[error] Input directory not found: {MD_DIR}", file=sys.stderr)
+    if not EVAL_DATASET_FILE.exists():
+        print(f"[error] {EVAL_DATASET_FILE} not found. Run stage0_build_eval_dataset.py first.", file=sys.stderr)
         sys.exit(1)
 
-    md_files = sorted(MD_DIR.glob("*.md"))
-    if not md_files:
-        print(f"[error] No markdown files found in {MD_DIR}", file=sys.stderr)
-        sys.exit(1)
+    records = json.loads(EVAL_DATASET_FILE.read_text(encoding="utf-8"))
+    if args.limit:
+        records = records[: args.limit]
 
+    system_prompt = load_system_prompt()
     model_path = ensure_model_downloaded()
-    chain = build_chain(model_path, device)
+    chain = build_chain(model_path, device, system_prompt)
 
-    dataset = []
-    for md_path in md_files:
-        print(md_path,' ')
-        record = parse_file(chain, md_path)
-        dataset.append(record)
+    predictions = []
+    for record in records:
+        predictions.append(parse_record(chain, record))
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    OUTPUT_FILE.write_text(json.dumps(dataset, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"[done] wrote {OUTPUT_FILE}")
+    OUTPUT_FILE.write_text(json.dumps(predictions, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"[done] wrote {len(predictions)} predictions to {OUTPUT_FILE}")
+
 
 if __name__ == "__main__":
     main()

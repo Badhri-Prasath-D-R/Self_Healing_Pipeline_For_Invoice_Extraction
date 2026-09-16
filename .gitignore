@@ -1,2 +1,22 @@
-venv
-models
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Python cache and tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Local secrets and configuration
+.env
+.env.*
+!.env.example
+
+# Local MLflow tracking state
+mlartifacts/
+mlflow.db
+
+# Downloaded model weights
+models/

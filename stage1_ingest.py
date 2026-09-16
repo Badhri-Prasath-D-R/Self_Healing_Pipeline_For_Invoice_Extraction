@@ -9,8 +9,6 @@ RAW_PDF_DIR = BASE_DIR / "data" / "raw_pdfs"
 OUTPUT_DIR = BASE_DIR / "data" / "extracted_md"
 MODEL_DIR = BASE_DIR / "models" / "mineru2.5-pro"
 
-
-
 def ensure_model_downloaded() -> Path:
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     marker = MODEL_DIR / ".download_complete"
