@@ -113,10 +113,17 @@ def build_updated_prompt(base_prompt: str, exemplars: list) -> str:
         "WRONG, and the CORRECT extraction that should have been produced. "
         "Learn the pattern of each correction and apply it generally.\n"
     )
+    # Cap input text per exemplar more aggressively than a normal document:
+    # each exemplar's OCR text AND ground truth JSON both get added to every
+    # future prompt, so with multiple exemplars this compounds fast and can
+    # push the combined system prompt + per-document input past the model's
+    # context window, causing the pipeline to error on EVERY call silently
+    # (see run_extraction's debug logging if this happens again).
+    EXEMPLAR_TEXT_CHARS = 1500
     for idx, ex in enumerate(exemplars, 1):
         text = ex["input_text"]
-        if len(text) > MAX_INPUT_CHARS:
-            text = text[:MAX_INPUT_CHARS]
+        if len(text) > EXEMPLAR_TEXT_CHARS:
+            text = text[:EXEMPLAR_TEXT_CHARS] + " [...truncated]"
         prompt += f"\n--- Correction example {idx} ---\n"
         prompt += f"Input Document Text:\n{text}\n"
         prompt += f"CORRECT Target JSON:\n{json.dumps(ex['ground_truth'], ensure_ascii=False)}\n"
@@ -126,13 +133,24 @@ def build_updated_prompt(base_prompt: str, exemplars: list) -> str:
 # ---- Evaluating a prompt against the holdout split --------------------------
 
 
+_debug_failure_count = 0
+
+
 def run_extraction(chain, text: str) -> Optional[dict]:
+    global _debug_failure_count
     if len(text) > MAX_INPUT_CHARS:
         text = text[:MAX_INPUT_CHARS]
     try:
         raw_output = chain.invoke({"document": text})
         return extract_json(raw_output)
-    except Exception:
+    except Exception as e:
+        if _debug_failure_count < 3:
+            _debug_failure_count += 1
+            print(f"    [debug] extraction failed ({e}); raw output preview:")
+            try:
+                print(f"    [debug] {raw_output[:300]!r}")
+            except NameError:
+                print("    [debug] (chain.invoke itself raised, no raw_output captured)")
         return None
 
 
@@ -278,6 +296,28 @@ def main():
     new_prompt = build_updated_prompt(current_prompt, exemplars)
 
     model_path = ensure_model_downloaded()
+
+    # Fail fast and loudly if the prompt is too long for the model's context
+    # window, rather than silently burning ~20 minutes generating garbage
+    # for every holdout document (each one would raise inside
+    # run_extraction and get recorded as a 0% result, which looks like a
+    # bad prompt rather than an infrastructure problem).
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(str(model_path))
+    new_prompt_tokens = len(tokenizer.encode(new_prompt))
+    max_context = getattr(tokenizer, "model_max_length", 32768)
+    # Reserve room for the per-document input text and the generation budget
+    RESERVED_FOR_INPUT_AND_OUTPUT = 2048 + 2048
+    if max_context and max_context < 1_000_000 and new_prompt_tokens + RESERVED_FOR_INPUT_AND_OUTPUT > max_context:
+        print(
+            f"[error] New prompt is {new_prompt_tokens} tokens, which combined with "
+            f"reserved space for input+output ({RESERVED_FOR_INPUT_AND_OUTPUT}) exceeds "
+            f"the model's context window ({max_context}). Reduce --num-examples or "
+            f"shorten exemplar text before continuing.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(f"[info] New prompt size: {new_prompt_tokens} tokens (context window: {max_context})")
 
     print("[eval] Evaluating CURRENT (production) prompt on holdout set...")
     old_chain = build_chain(model_path, device, current_prompt)
