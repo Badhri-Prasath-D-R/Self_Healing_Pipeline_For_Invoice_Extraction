@@ -1,0 +1,6 @@
+outs:
+- md5: 141f1ca66eae02a668161e337d2151de.dir
+  size: 665387
+  nfiles: 101
+  hash: md5
+  path: kaggle_invoices
