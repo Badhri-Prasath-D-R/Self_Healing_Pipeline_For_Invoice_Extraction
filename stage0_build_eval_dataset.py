@@ -12,8 +12,16 @@ Output:
         list of: {
             "source_file": "invoice_51109301.pdf",
             "input_text": "<ocred_text>",
-            "ground_truth": { ...parsed json_data... }
+            "ground_truth": { ...parsed json_data... },
+            "split": "train" | "holdout"
         }
+
+    A deterministic 80/20 train/holdout split is assigned (seeded, so it's
+    stable across re-runs unless you delete the file and regenerate).
+    "train" documents are fair game for building few-shot correction
+    examples; "holdout" documents must NEVER be used to build examples —
+    they exist so Stage 4 can honestly measure whether a new prompt
+    version actually generalizes, instead of just memorizing train mistakes.
 
 This does NOT run Stage 1 (MinerU) — it uses the dataset's own provided
 ocred_text as the model input for now, so we can test the Stage 2 + drift
@@ -23,6 +31,7 @@ input_text at your extracted markdown instead.
 
 import csv
 import json
+import random
 import sys
 from pathlib import Path
 
@@ -30,6 +39,9 @@ BASE_DIR = Path(__file__).resolve().parent
 CSV_PATH = BASE_DIR / "data" / "kaggle_invoices" / "Batch 1" / "batch_1.csv"
 OUTPUT_DIR = BASE_DIR / "data" / "eval_dataset"
 OUTPUT_FILE = OUTPUT_DIR / "dataset.json"
+
+HOLDOUT_FRACTION = 0.2
+SPLIT_SEED = 42  # fixed seed so the split is reproducible across machines/runs
 
 
 def main():
@@ -59,10 +71,22 @@ def main():
                 }
             )
 
+    # Deterministic shuffle + split, independent of CSV row order
+    rng = random.Random(SPLIT_SEED)
+    indices = list(range(len(records)))
+    rng.shuffle(indices)
+    n_holdout = max(1, round(len(records) * HOLDOUT_FRACTION))
+    holdout_indices = set(indices[:n_holdout])
+
+    for i, r in enumerate(records):
+        r["split"] = "holdout" if i in holdout_indices else "train"
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_FILE.write_text(json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    n_train = len(records) - len(holdout_indices)
     print(f"[done] wrote {len(records)} records to {OUTPUT_FILE}")
+    print(f"[done] split: {n_train} train / {len(holdout_indices)} holdout")
     if skipped:
         print(f"[warn] skipped {len(skipped)} rows with invalid JSON:", file=sys.stderr)
         for name, err in skipped:

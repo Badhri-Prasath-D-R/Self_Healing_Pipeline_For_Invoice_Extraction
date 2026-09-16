@@ -30,6 +30,7 @@ from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent
 PREDICTIONS_FILE = BASE_DIR / "data" / "structured_json" / "predictions.json"
+EVAL_DATASET_FILE = BASE_DIR / "data" / "eval_dataset" / "dataset.json"
 OUTPUT_DIR = BASE_DIR / "data" / "mistakes"
 MISTAKES_FILE = OUTPUT_DIR / "mistakes.json"
 SUMMARY_FILE = OUTPUT_DIR / "summary.json"
@@ -80,10 +81,22 @@ def main():
 
     predictions = json.loads(PREDICTIONS_FILE.read_text(encoding="utf-8"))
 
+    # Build source_file -> (input_text, split) lookup from the eval dataset,
+    # since predictions.json doesn't carry these fields forward.
+    input_text_by_file = {}
+    split_by_file = {}
+    if EVAL_DATASET_FILE.exists():
+        eval_records = json.loads(EVAL_DATASET_FILE.read_text(encoding="utf-8"))
+        input_text_by_file = {r["source_file"]: r["input_text"] for r in eval_records}
+        split_by_file = {r["source_file"]: r.get("split", "unknown") for r in eval_records}
+    else:
+        print(f"[warn] {EVAL_DATASET_FILE} not found; mistakes.json will have input_text=null", file=sys.stderr)
+
     mistakes = []
     field_error_counter = Counter()
     parse_failures = 0
     clean_records = 0
+    split_stats = {"train": {"total": 0, "clean": 0}, "holdout": {"total": 0, "clean": 0}}
 
     for record in predictions:
         source_file = record["source_file"]
@@ -95,6 +108,9 @@ def main():
             parse_failures += 1
 
         diffs = diff_record(prediction, ground_truth)
+        split = split_by_file.get(source_file, "unknown")
+        if split in split_stats:
+            split_stats[split]["total"] += 1
 
         if diffs:
             for d in diffs:
@@ -102,7 +118,8 @@ def main():
             mistakes.append(
                 {
                     "source_file": source_file,
-                    "input_text": None,  # filled in below if available
+                    "split": split,
+                    "input_text": input_text_by_file.get(source_file),
                     "prediction": prediction,
                     "ground_truth": ground_truth,
                     "raw_model_output": record.get("raw_model_output"),
@@ -112,6 +129,8 @@ def main():
             )
         else:
             clean_records += 1
+            if split in split_stats:
+                split_stats[split]["clean"] += 1
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     MISTAKES_FILE.write_text(json.dumps(mistakes, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -123,12 +142,24 @@ def main():
         "records_with_mistakes": len(mistakes),
         "parse_failures": parse_failures,
         "accuracy_exact_match": round(clean_records / total, 4) if total else 0.0,
+        "accuracy_by_split": {
+            split: {
+                "total": stats["total"],
+                "clean": stats["clean"],
+                "accuracy": round(stats["clean"] / stats["total"], 4) if stats["total"] else None,
+            }
+            for split, stats in split_stats.items()
+        },
         "most_common_field_errors": field_error_counter.most_common(20),
     }
     SUMMARY_FILE.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print(f"[done] {clean_records}/{total} records matched ground truth exactly")
     print(f"[done] {len(mistakes)} records had at least one mistake ({parse_failures} outright parse failures)")
+    for split, stats in split_stats.items():
+        if stats["total"]:
+            acc = stats["clean"] / stats["total"]
+            print(f"[done] {split}: {stats['clean']}/{stats['total']} ({acc:.1%})")
     print(f"[done] wrote {MISTAKES_FILE}")
     print(f"[done] wrote {SUMMARY_FILE}")
     print()

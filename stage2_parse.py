@@ -110,10 +110,50 @@ as they would appear printed on the invoice (e.g. "74,120.00", not 74120).
 - The three "total_*" fields in summary should be prefixed with the \
 currency code exactly as printed (e.g. "INR 1,676,976.00").
 - If the document has only one item, "items" is still a list with one entry.
+- List EVERY line item individually, in full, even if there are many or \
+they look repetitive. NEVER shorten the list with a placeholder like \
+"// ... other items" or "etc." — that produces invalid JSON and loses data.
 - If a field genuinely cannot be found, use an empty string "" rather than \
 inventing a value.
 - Return ONLY the single JSON object. No prose, no markdown code fences, \
 no explanations, no trailing commentary.
+
+IMPORTANT — seller/client block layout:
+The OCR text often lays the seller and client out as two side-by-side \
+columns that get flattened into merged lines, like this:
+
+  Seller: Client:
+  TechVision Distributors Pvt Ltd Raj Electronics Pvt Ltd
+  Plot 14, MIDC Industrial Area, Andheri East 42 MG Road
+  Mumbai, Maharashtra - 400093 Bengaluru, Karnataka - 560001
+  Tax Id: 27AABCT1234F1Z5 Tax Id: 901-95-4704
+  GSTIN: 27AABCT1234F1Z8
+
+For that input, the correct extraction splits EACH merged line at its \
+midpoint into a seller half (first) and a client half (second). Note that \
+"gstin" is a SEPARATE field from "tax_id" — when a GSTIN line appears \
+anywhere in the seller block (even on its own line, not merged with a \
+client column), it belongs in "seller.gstin" and must NOT be dropped:
+
+{
+  "seller": {
+    "name": "TechVision Distributors Pvt Ltd",
+    "address": "Plot 14, MIDC Industrial Area, Andheri East, Mumbai, Maharashtra - 400093",
+    "tax_id": "27AABCT1234F1Z5",
+    "gstin": "27AABCT1234F1Z8"
+  },
+  "client": {
+    "name": "Raj Electronics Pvt Ltd",
+    "address": "42 MG Road, Bengaluru, Karnataka - 560001",
+    "tax_id": "901-95-4704"
+  }
+}
+
+Do NOT leave "client" fields empty and do NOT put the word "Client:" into \
+"seller.address" — always split the merged line into its two halves. Only \
+omit "seller.gstin" entirely when no GSTIN line exists anywhere in the \
+source text for this invoice — never omit it just because this example \
+pattern is being followed.
 """
 
 
@@ -174,7 +214,7 @@ def build_chain(model_path: Path, device: str, system_prompt: str):
         "text-generation",
         model=model,
         tokenizer=tokenizer,
-        max_new_tokens=1024,
+        max_new_tokens=2048,  # raised from 1024: invoices with 7-8 line items were getting truncated mid-JSON
         do_sample=False,
         temperature=None,
         top_p=None,
@@ -186,7 +226,7 @@ def build_chain(model_path: Path, device: str, system_prompt: str):
 
     prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", system_prompt),
+            ("system", system_prompt.replace("{", "{{").replace("}", "}}")),
             ("human", "Invoice OCR text:\n\n{document}"),
         ]
     )
@@ -258,6 +298,19 @@ def main():
             device = "cuda" if torch.cuda.is_available() else "cpu"
         except ImportError:
             device = "cpu"
+    elif device == "cuda":
+        import torch
+        if not torch.cuda.is_available():
+            print(
+                "[error] --device cuda was requested but torch.cuda.is_available() "
+                "is False on this machine.\n"
+                "        Check: (1) `nvidia-smi` shows your GPU, "
+                "(2) you installed a CUDA build of torch, not the CPU-only wheel "
+                "(pip install torch --index-url https://download.pytorch.org/whl/cu121).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    print(f"[device] Using device: {device}")
 
     if not EVAL_DATASET_FILE.exists():
         print(f"[error] {EVAL_DATASET_FILE} not found. Run stage0_build_eval_dataset.py first.", file=sys.stderr)
