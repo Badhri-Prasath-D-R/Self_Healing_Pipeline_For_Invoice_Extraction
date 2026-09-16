@@ -1,0 +1,6 @@
+outs:
+- md5: 6d340e2130a76b331275b4d5a05cdb48.dir
+  size: 692518
+  nfiles: 2
+  hash: md5
+  path: structured_json
