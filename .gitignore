@@ -20,3 +20,4 @@ mlflow.db
 
 # Downloaded model weights
 models/
+/prompts
