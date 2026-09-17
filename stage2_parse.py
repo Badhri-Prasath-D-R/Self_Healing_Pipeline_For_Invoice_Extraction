@@ -115,8 +115,12 @@ they look repetitive. NEVER shorten the list with a placeholder like \
 "// ... other items" or "etc." — that produces invalid JSON and loses data.
 - If a field genuinely cannot be found, use an empty string "" rather than \
 inventing a value.
-- Return ONLY the single JSON object. No prose, no markdown code fences, \
-no explanations, no trailing commentary.
+- Return ONLY the single JSON object. Your response must start with the \
+character "{" and end with the character "}" — nothing before, nothing \
+after. Do NOT wrap the JSON in ```json code fences, do NOT add any prose, \
+explanations, or commentary of any kind. A code fence wastes output space \
+and risks the response being cut off before the JSON is complete — never \
+use one.
 
 IMPORTANT — seller/client block layout:
 The OCR text often lays the seller and client out as two side-by-side \
@@ -237,9 +241,19 @@ def build_chain(model_path: Path, device: str, system_prompt: str):
 
 def extract_json(raw_text: str) -> Any:
     text = raw_text.strip()
+
+    # Handle a COMPLETE fenced block first (both opening and closing ```).
     fence_match = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
     if fence_match:
         text = fence_match.group(1).strip()
+    else:
+        # Handle an UNCLOSED opening fence — the model started a ```json
+        # block but got cut off (e.g. by max_new_tokens) before closing it.
+        # Without this, a truncated-but-otherwise-salvageable object gets
+        # discarded entirely just because of the missing closing fence.
+        open_fence_match = re.match(r"```(?:json)?\s*", text)
+        if open_fence_match:
+            text = text[open_fence_match.end():]
 
     try:
         return json.loads(text)
@@ -250,6 +264,27 @@ def extract_json(raw_text: str) -> Any:
     if brace_match:
         candidate = brace_match.group(0)
         candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    # Last resort: the object never closed at all (truncated mid-generation,
+    # no closing brace anywhere). Try to salvage a partial result by
+    # closing any dangling string/array/object nesting. This recovers
+    # SOME fields from a truncated response instead of scoring the whole
+    # document as 0% just because generation ran out of tokens partway
+    # through the LAST field.
+    if text.lstrip().startswith("{"):
+        candidate = text
+        # Close an unterminated string value if the text ends mid-string
+        if candidate.count('"') % 2 == 1:
+            candidate += '"'
+        # Trim a trailing dangling comma/key fragment, then close brackets
+        candidate = re.sub(r",\s*\"?[A-Za-z_]*\"?\s*:?\s*$", "", candidate)
+        open_braces = candidate.count("{") - candidate.count("}")
+        open_brackets = candidate.count("[") - candidate.count("]")
+        candidate += "]" * max(open_brackets, 0) + "}" * max(open_braces, 0)
         try:
             return json.loads(candidate)
         except json.JSONDecodeError:

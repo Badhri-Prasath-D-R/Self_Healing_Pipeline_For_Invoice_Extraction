@@ -133,24 +133,20 @@ def build_updated_prompt(base_prompt: str, exemplars: list) -> str:
 # ---- Evaluating a prompt against the holdout split --------------------------
 
 
-_debug_failure_count = 0
-
-
-def run_extraction(chain, text: str) -> Optional[dict]:
-    global _debug_failure_count
+def run_extraction(chain, text: str, debug_state: dict, label: str = "") -> Optional[dict]:
     if len(text) > MAX_INPUT_CHARS:
         text = text[:MAX_INPUT_CHARS]
     try:
         raw_output = chain.invoke({"document": text})
         return extract_json(raw_output)
     except Exception as e:
-        if _debug_failure_count < 3:
-            _debug_failure_count += 1
-            print(f"    [debug] extraction failed ({e}); raw output preview:")
+        if debug_state["count"] < 3:
+            debug_state["count"] += 1
+            print(f"    [debug:{label}] extraction failed ({e}); raw output preview:")
             try:
-                print(f"    [debug] {raw_output[:300]!r}")
+                print(f"    [debug:{label}] {raw_output[:500]!r}")
             except NameError:
-                print("    [debug] (chain.invoke itself raised, no raw_output captured)")
+                print(f"    [debug:{label}] (chain.invoke itself raised, no raw_output captured)")
         return None
 
 
@@ -199,14 +195,15 @@ def field_level_accuracy(prediction: Optional[dict], ground_truth: dict) -> tupl
     return correct, total
 
 
-def evaluate_prompt(chain, holdout_records: list) -> dict:
+def evaluate_prompt(chain, holdout_records: list, label: str = "") -> dict:
     exact_correct = 0
     total_docs = len(holdout_records)
     field_correct_sum = 0
     field_total_sum = 0
+    debug_state = {"count": 0}
 
     for i, r in enumerate(holdout_records, 1):
-        pred = run_extraction(chain, r["input_text"])
+        pred = run_extraction(chain, r["input_text"], debug_state, label=label)
         exact = is_exact_match(pred, r["ground_truth"])
         f_correct, f_total = field_level_accuracy(pred, r["ground_truth"])
 
@@ -321,7 +318,7 @@ def main():
 
     print("[eval] Evaluating CURRENT (production) prompt on holdout set...")
     old_chain = build_chain(model_path, device, current_prompt)
-    old_results = evaluate_prompt(old_chain, holdout_records)
+    old_results = evaluate_prompt(old_chain, holdout_records, label="OLD")
     print(
         f"[eval] Current prompt — field accuracy: {old_results['field_accuracy']:.1%} "
         f"({old_results['field_correct']}/{old_results['field_total']}), "
@@ -330,7 +327,7 @@ def main():
 
     print("[eval] Evaluating NEW (candidate) prompt on holdout set...")
     new_chain = build_chain(model_path, device, new_prompt)
-    new_results = evaluate_prompt(new_chain, holdout_records)
+    new_results = evaluate_prompt(new_chain, holdout_records, label="NEW")
     print(
         f"[eval] New prompt — field accuracy: {new_results['field_accuracy']:.1%} "
         f"({new_results['field_correct']}/{new_results['field_total']}), "
