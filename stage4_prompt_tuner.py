@@ -325,6 +325,33 @@ def main():
         f"exact-match: {old_results['exact_accuracy']:.1%} ({old_results['exact_correct']}/{old_results['exact_total']})"
     )
 
+    # Free the first model's GPU memory before loading a second instance.
+    # Without this, both models sit in VRAM simultaneously — two 1.5B-param
+    # instances (weights + KV cache + activations) don't fit on a 6GB card,
+    # so the second evaluation pass OOMs on every single document, which
+    # silently produces a flat 0% result that looks like a bad prompt
+    # rather than the infrastructure problem it actually is.
+    try:
+        # Reach into the chain (prompt | ChatHuggingFace(llm=HuggingFacePipeline) | parser)
+        # to find and explicitly delete the underlying transformers model.
+        # `del old_chain` alone may not drop the refcount to zero since
+        # LangChain wraps the pipeline in several layers.
+        hf_chat_model = old_chain.middle[0] if hasattr(old_chain, "middle") else None
+        if hf_chat_model is not None:
+            underlying_pipeline = getattr(hf_chat_model.llm, "pipeline", None)
+            if underlying_pipeline is not None:
+                del underlying_pipeline.model
+    except Exception as e:
+        print(f"[warn] Could not explicitly free model reference: {e}")
+    del old_chain
+    if device == "cuda":
+        import torch
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        print(f"[info] Freed old model from GPU. Current allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+
     print("[eval] Evaluating NEW (candidate) prompt on holdout set...")
     new_chain = build_chain(model_path, device, new_prompt)
     new_results = evaluate_prompt(new_chain, holdout_records, label="NEW")
