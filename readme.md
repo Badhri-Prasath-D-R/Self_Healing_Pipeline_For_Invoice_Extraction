@@ -5,8 +5,6 @@ PDFs using a small local LLM (Qwen2.5-1.5B-Instruct), and automatically
 improves its own extraction prompt over time by learning from its real
 mistakes — without any model fine-tuning or retraining.
 
-Built as a college MLOps project (Semester 5).
-
 ## What this actually does
 
 1. Takes invoice OCR text and extracts it into a fixed structured JSON
